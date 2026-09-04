@@ -926,7 +926,9 @@ function reconcileAutoDividends(){
 }
 
 /* 股息行事曆 — 月度匯總:取過去 12 個月實際派息,按月份(1-12)歸類加總,
-   稅後、換算為基準貨幣,作為「典型年度各月股息」的預估。回傳長度 12 陣列(index 0=1月)。 */
+   稅後、換算為基準貨幣,作為「典型年度各月股息」的預估。
+   同一股息週期(相隔約一年、同月份的除淨)只取窗內最近一次,避免同年重複計入。
+   回傳長度 12 陣列(index 0=1月)。 */
 function dividendMonthly(base){
   base=base||state.settings.baseCcy||"USD";
   const months=new Array(12).fill(0);
@@ -941,8 +943,15 @@ function dividendMonthly(base){
     // 取當前持股(作為回退:若除息日尚未持有,以當前持股推算)
     const curByLoc=unitsByLocAt(sym,today,false);
     let curUnits=0; for(const loc in curByLoc){const u=curByLoc[loc]; if(u>1e-9)curUnits+=u;}
+    // 同一股息週期(相隔約一年、同月份的除淨)只取窗內最近一次,避免「典型年度」重複計入
+    const best={}; // 月份(1-12) → 窗內該月最接近今天的除淨事件
     for(const d of ev.dividends){
       if(d.date<yAgoStr||d.date>today)continue;          // 只取過去 12 個月
+      const mo=parseInt(d.date.slice(5,7),10);
+      if(!best[mo]||d.date>best[mo].date)best[mo]=d;
+    }
+    for(const mo in best){
+      const d=best[mo];
       const byLoc=unitsByLocAt(sym,d.date,true);
       let units=0; for(const loc in byLoc){const u=byLoc[loc]; if(u>1e-9)units+=u;}
       // 若除息日尚未持有,以當前持股推算(讓新買入的股票也能看到完整股息歷史)
@@ -952,7 +961,7 @@ function dividendMonthly(base){
       const net=grossCcy*(1-tax);
       const idx=dIdx(d.date);
       const baseAmt=fx(net,ccy,base,idx);
-      const mon=parseInt(d.date.slice(5,7),10)-1;          // 0-11
+      const mon=mo-1;          // 0-11
       if(mon>=0&&mon<12)months[mon]+=baseAmt;
     }
   }
@@ -960,7 +969,8 @@ function dividendMonthly(base){
 }
 
 /* 股息行事曆 — 除淨日時間軸:
-   真實=過去一年各持倉的除淨日(及拆股);假想=把過去一年的除淨日 +1 年(同月同日,約)。
+   真實=過去一年各持倉的除淨日(及拆股);假想=每一股息週期(同月份)只以窗內最近一次
+   真實除淨日 +1 年外推(同月同日,約),避免同一週期重複外推造成幽靈事件。
    對於新買入的股票(除息日尚未持有),以當前持股推算並標記為假設。
    回傳依日期排序的事件陣列 [{sym,name,date,perShare,ccy,kind:'div'|'split',hypothetical:bool}]。 */
 function dividendTimeline(){
@@ -974,7 +984,8 @@ function dividendTimeline(){
     const o=SYM_MAP[sym]; const ccy=o?o.c:"USD"; const nm=o?(o.z||o.n||sym):sym;
     // 取當前持股(回退用)
     const curByLoc=unitsByLocAt(sym,today,false); let curUnits=0; for(const loc in curByLoc){if(curByLoc[loc]>1e-9)curUnits+=curByLoc[loc]}
-    // 真實過去一年:股息
+    // 真實過去一年:股息(同一週期多次除淨時,假想未來只由最近一次外推)
+    const hypSrc={}; // 月份(1-12) → 窗內該月最接近今天的除淨事件(供外推假想)
     for(const d of (ev.dividends||[])){
       if(d.date<yAgoStr||d.date>today)continue;
       const byLoc=unitsByLocAt(sym,d.date,true); let units=0; for(const loc in byLoc){if(byLoc[loc]>1e-9)units+=byLoc[loc]}
@@ -983,10 +994,15 @@ function dividendTimeline(){
       if(units<=1e-9)continue;
       // 除息日未持有者標記為假設,已持有者為真實
       out.push({sym,name:nm,date:d.date,perShare:d.amount,ccy,units:+units.toFixed(4),kind:"div",hypothetical:!heldAtEx});
-      // 假想未來:同月同日 +1 年
-      const fd=new Date(d.date); fd.setFullYear(fd.getFullYear()+1); const fds=fmtD(fd);
+      const mo=parseInt(d.date.slice(5,7),10);
+      if(!hypSrc[mo]||d.date>hypSrc[mo].date)hypSrc[mo]={date:d.date,perShare:d.amount,units:+units.toFixed(4)};
+    }
+    // 假想未來:每一股息週期只以窗內最近一次真實除淨 +1 年(同月同日,約)
+    for(const mo in hypSrc){
+      const h=hypSrc[mo];
+      const fd=new Date(h.date); fd.setFullYear(fd.getFullYear()+1); const fds=fmtD(fd);
       if(fds>today&&fds<=yFwdStr){
-        out.push({sym,name:nm,date:fds,perShare:d.amount,ccy,units:+units.toFixed(4),kind:"div",hypothetical:true});
+        out.push({sym,name:nm,date:fds,perShare:h.perShare,ccy,units:h.units,kind:"div",hypothetical:true});
       }
     }
     // 真實過去一年:拆股(其他公司行動)

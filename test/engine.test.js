@@ -662,6 +662,67 @@ function dStr(monthsAgo, day) {
   ok(Math.abs(hyp.units - 200) < 1e-6, '(L3) 假想日帶當前持股 200');
 })();
 
+// (L4) 同週期去重:同一股息週期(去年同月 vs 今年同月,皆在 12 個月窗內)只計最近一次
+(function () {
+  state.settings.baseCcy = 'USD'; state.settings.divTax = 0;
+  const eOld = new Date(TODAY); eOld.setFullYear(eOld.getFullYear() - 1); // 去年同月同日(窗邊界)
+  const eNew = new Date(TODAY);                                          // 今年同月(較近)
+  const sOld = fmtD(eOld), sNew = fmtD(eNew);
+  REAL.events['L4'] = { dividends: [{ date: sOld, amount: 1 }, { date: sNew, amount: 1 }], splits: [] };
+  registerSym({ s: 'L4', n: 'L4', z: 'L4', m: 'US', c: 'USD' });
+  state.txns = [
+    { id: '1', kind: 'cash', ccy: 'USD', loc: 'A', amount: 100000, date: dStr(13, 1) },
+    { id: '2', kind: 'stock', sym: 'L4', ccy: 'USD', loc: 'A', side: 'buy', price: 100, units: 100, date: dStr(13, 1) }];
+  const months = dividendMonthly('USD');
+  const iM = parseInt(sNew.slice(5, 7), 10) - 1;
+  ok(Math.abs(months[iM] - 100) < 1e-6, '(L4) 同週期(去年/今年同月)只計最近一次 $100 非 $200');
+  const sum = months.reduce((a, b) => a + b, 0);
+  ok(Math.abs(sum - 100) < 1e-6, '(L4) 全年總和 $100(不重複計入去年同週期)');
+})();
+
+// (L4b) 時間軸:同週期兩次真實除淨皆列出,但假想未來只由最近一次 +1 年外推(不重複)
+(function () {
+  state.settings.baseCcy = 'USD'; state.settings.divTax = 0;
+  const eNew = new Date(TODAY);
+  const eOld = new Date(TODAY); eOld.setDate(eOld.getDate() - 364);
+  // 罕見邊界(364 天前落入不同月份時退回恰一年前,仍驗證去重路徑)
+  if (eOld.getMonth() !== eNew.getMonth()) { eOld.setTime(eNew.getTime()); eOld.setFullYear(eNew.getFullYear() - 1); }
+  REAL.events['L4B'] = { dividends: [{ date: fmtD(eOld), amount: 0.5 }, { date: fmtD(eNew), amount: 0.5 }], splits: [] };
+  registerSym({ s: 'L4B', n: 'L4B', z: 'L4B', m: 'US', c: 'USD' });
+  state.txns = [
+    { id: '1', kind: 'cash', ccy: 'USD', loc: 'A', amount: 100000, date: dStr(13, 1) },
+    { id: '2', kind: 'stock', sym: 'L4B', ccy: 'USD', loc: 'A', side: 'buy', price: 100, units: 100, date: dStr(13, 1) }];
+  const tl = dividendTimeline().filter(e => e.sym === 'L4B');
+  const reals = tl.filter(e => !e.hypothetical), hyps = tl.filter(e => e.hypothetical);
+  ok(reals.length === 2, '(L4b) 兩次真實除淨皆列出(歷史事實保留)');
+  ok(hyps.length === 1, '(L4b) 同週期只外推一次假想(無幽靈重複)');
+  if (hyps.length === 1) {
+    const exp = new Date(eNew); exp.setFullYear(exp.getFullYear() + 1);
+    ok(hyps[0].date === fmtD(exp), '(L4b) 假想來自最近一次除淨 +1 年');
+  }
+})();
+
+// (L4c) 每年派息兩次(2/yr):另一週期照計,同週期不重複 → 全年 = 兩週期各一次
+(function () {
+  state.settings.baseCcy = 'USD'; state.settings.divTax = 0;
+  const eSepOld = new Date(TODAY); eSepOld.setFullYear(eSepOld.getFullYear() - 1); // 去年 9 月週期(窗邊界)
+  const eMid = new Date(TODAY); eMid.setMonth(eMid.getMonth() - 5); eMid.setDate(20); // 另一週期(~5個月前)
+  const eSepNew = new Date(TODAY);                                                  // 今年 9 月週期(較近)
+  REAL.events['L4C'] = {
+    dividends: [{ date: fmtD(eSepOld), amount: 1 }, { date: fmtD(eMid), amount: 1.5 }, { date: fmtD(eSepNew), amount: 1 }],
+    splits: [] };
+  registerSym({ s: 'L4C', n: 'L4C', z: 'L4C', m: 'US', c: 'USD' });
+  state.txns = [
+    { id: '1', kind: 'cash', ccy: 'USD', loc: 'A', amount: 100000, date: dStr(13, 1) },
+    { id: '2', kind: 'stock', sym: 'L4C', ccy: 'USD', loc: 'A', side: 'buy', price: 100, units: 100, date: dStr(13, 1) }];
+  const months = dividendMonthly('USD');
+  const iSep = parseInt(fmtD(eSepNew).slice(5, 7), 10) - 1, iMid = parseInt(fmtD(eMid).slice(5, 7), 10) - 1;
+  ok(Math.abs(months[iSep] - 100) < 1e-6, '(L4c) 9月週期只計今年一次 $100');
+  ok(Math.abs(months[iMid] - 150) < 1e-6, '(L4c) 另一週期照計 $150');
+  const sum = months.reduce((a, b) => a + b, 0);
+  ok(Math.abs(sum - 250) < 1e-6, '(L4c) 全年 = 兩週期各一次 $250(非 $350)');
+})();
+
 // ============ (M) 變化圖比較項:持久化與上限 ============
 // (M1) 還原邏輯:settings.chartComps → state.chart.comps(去重、限上限 5)
 (function () {
